@@ -192,6 +192,9 @@ SKILL_DEFINITIONS = [
 
 DEBUG = True  # set False to silence debug output
 
+from collections import defaultdict
+_tool_usage = defaultdict(int)  # tracks invocation count per skill across the run
+
 
 def _dbg(msg: str):
     if DEBUG:
@@ -213,18 +216,38 @@ def _call_ollama(model: str, messages: list, tools: list) -> dict:
 
 
 def _execute(fn_name: str, fn_args: dict) -> str:
-    _dbg(f"skill call → {fn_name}({fn_args})")
+    _tool_usage[fn_name] += 1
+    _dbg(f"skill call #{_tool_usage[fn_name]} → {fn_name}({fn_args})")
     fn = SKILL_MAP.get(fn_name)
     if fn is None:
         _dbg(f"UNKNOWN skill '{fn_name}' — available: {list(SKILL_MAP.keys())}")
         return json.dumps({"error": f"unknown skill: {fn_name}"})
     try:
         result = fn(**fn_args)
-        _dbg(f"result    → {result}")
+        _dbg(f"result → {result}")
         return json.dumps(result)
     except Exception as exc:
-        _dbg(f"ERROR     → {exc}")
+        _dbg(f"ERROR  → {exc}")
         return json.dumps({"error": str(exc)})
+
+
+def print_tool_usage():
+    """Print a summary of how many times each skill was invoked."""
+    if not _tool_usage:
+        print("  [tool usage] no skills invoked")
+        return
+    total = sum(_tool_usage.values())
+    print(f"\n  {'─'*40}")
+    print(f"  Tool usage summary  (total: {total})")
+    print(f"  {'─'*40}")
+    for name, count in sorted(_tool_usage.items(), key=lambda x: -x[1]):
+        bar = "█" * count
+        print(f"  {name:<30s} {count:3d}  {bar}")
+    print(f"  {'─'*40}")
+
+
+def reset_tool_usage():
+    _tool_usage.clear()
 
 
 def supports_tools(model: str) -> bool:
@@ -251,7 +274,6 @@ def run_agent(model: str, user_prompt: str, max_rounds: int = 3) -> str:
             _dbg("no tool calls — final answer")
             return (msg.get("content") or "").strip()
 
-        # Append assistant turn then execute each tool call
         messages.append({"role": "assistant", "content": msg.get("content") or "", "tool_calls": tool_calls})
         for tc in tool_calls:
             fn_name = tc["function"]["name"]
@@ -470,7 +492,9 @@ def run_all(tasks: list = None):
         print(f"\n{'='*60}")
         print(f" Running model: {model}  [with skills]")
         print(f"{'='*60}")
+        reset_tool_usage()
         results[model] = evaluate(model, tasks)
+        print_tool_usage()
 
     print_grid(results, tasks)
 
