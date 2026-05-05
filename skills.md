@@ -42,3 +42,11 @@ Available skills:
 10. count_capital_words(text: str)  →  {"count": int}
     Counts words that are entirely in UPPERCASE (e.g. "NASA", "IMPORTANT").
     Use to verify your response has the required number of capitalized words.
+
+11. check_starts_with_prompt(text: str, prompt: str)  →  {"passed": bool, "detail": str}
+    Checks that your response begins by repeating the original prompt exactly.
+    Use when the task requires you to first repeat the prompt before answering.
+
+12. check_quotation(text: str)  →  {"passed": bool, "detail": str}
+    Checks that your entire response is wrapped in double quotation marks.
+    Use when the task requires the full response to start with " and end with ".

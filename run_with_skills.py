@@ -84,6 +84,19 @@ def count_capital_words(text: str) -> dict:
     return {"count": count}
 
 
+def check_starts_with_prompt(text: str, prompt: str) -> dict:
+    passed = text.strip().startswith(prompt.strip())
+    detail = "ok" if passed else f"starts with: '{text.strip()[:40]}'"
+    return {"passed": passed, "detail": detail}
+
+
+def check_quotation(text: str) -> dict:
+    s = text.strip()
+    passed = s.startswith('"') and s.endswith('"')
+    detail = "ok" if passed else "response not wrapped in double quotes"
+    return {"passed": passed, "detail": detail}
+
+
 SKILL_MAP = {
     "count_words":                count_words,
     "check_keywords":             check_keywords,
@@ -95,6 +108,8 @@ SKILL_MAP = {
     "count_bullets":              count_bullets,
     "count_sections":             count_sections,
     "count_capital_words":        count_capital_words,
+    "check_starts_with_prompt":   check_starts_with_prompt,
+    "check_quotation":            check_quotation,
 }
 
 with open(SKILLS_FILE) as f:
