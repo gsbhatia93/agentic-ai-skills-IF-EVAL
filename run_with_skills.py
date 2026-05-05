@@ -1,0 +1,409 @@
+"""
+IFEval runner WITH skills — ReAct-style agent loop.
+
+Skills (count_words, check_keywords) are injected via system prompt.
+The model signals tool calls via <tool_call> JSON blocks; the agent loop
+executes each skill and feeds results back before the model gives its final answer.
+"""
+
+import json
+import os
+import re
+import urllib.request
+
+OLLAMA_URL = "http://localhost:11434"
+
+SKILLS_FILE = os.path.join(os.path.dirname(__file__), "skills.md")
+
+
+def get_models() -> list:
+    req = urllib.request.Request(f"{OLLAMA_URL}/api/tags")
+    with urllib.request.urlopen(req, timeout=10) as resp:
+        return [m["name"] for m in json.loads(resp.read())["models"]]
+
+
+# ── Skills ─────────────────────────────────────────────────────────────────────
+
+def count_words(text: str) -> dict:
+    words = text.split()
+    return {"word_count": len(words), "char_count": len(text)}
+
+
+def check_keywords(text: str, keywords: list) -> dict:
+    text_lower = text.lower()
+    found = [k for k in keywords if k.lower() in text_lower]
+    missing = [k for k in keywords if k.lower() not in text_lower]
+    return {"found": found, "missing": missing, "all_present": len(missing) == 0}
+
+
+def check_no_comma(text: str) -> dict:
+    has_comma = "," in text
+    return {"has_comma": has_comma, "passed": not has_comma}
+
+
+def count_highlighted_sections(text: str) -> dict:
+    count = len(re.findall(r"\*[^*\n]+\*", text))
+    return {"count": count}
+
+
+def count_placeholders(text: str) -> dict:
+    count = len(re.findall(r"\[[^\]\n]+\]", text))
+    return {"count": count}
+
+
+def check_title_format(text: str) -> dict:
+    has_title = bool(re.search(r"<<[^>]+>>", text))
+    return {"has_title": has_title}
+
+
+def check_case(text: str, case: str) -> dict:
+    letters = [c for c in text if c.isalpha()]
+    if case == "lower":
+        passed = all(c.islower() for c in letters)
+        detail = "ok" if passed else "uppercase letters found"
+    elif case == "upper":
+        passed = all(c.isupper() for c in letters)
+        detail = "ok" if passed else "lowercase letters found"
+    else:
+        passed, detail = False, f"unknown case: {case}"
+    return {"passed": passed, "detail": detail}
+
+
+def count_bullets(text: str) -> dict:
+    count = sum(1 for l in text.splitlines() if re.match(r"^\s*[-*•]", l))
+    return {"count": count}
+
+
+def count_sections(text: str, splitter: str) -> dict:
+    count = len(re.findall(rf"(?m)^{re.escape(splitter)}", text))
+    return {"count": count}
+
+
+def count_capital_words(text: str) -> dict:
+    count = len([w for w in text.split() if w.isupper() and w.isalpha()])
+    return {"count": count}
+
+
+def check_json_format(text: str) -> dict:
+    try:
+        json.loads(text.strip())
+        return {"passed": True, "detail": "valid JSON"}
+    except Exception as e:
+        return {"passed": False, "detail": f"invalid JSON: {str(e)[:40]}"}
+
+
+def count_paragraphs(text: str) -> dict:
+    paragraphs = [p for p in re.split(r"\n\s*\n", text.strip()) if p.strip()]
+    return {"count": len(paragraphs)}
+
+
+def check_two_responses(text: str) -> dict:
+    passed = "******" in text
+    return {"passed": passed, "detail": "ok" if passed else "****** separator not found"}
+
+
+def count_letter_frequency(text: str, letter: str) -> dict:
+    count = text.lower().count(letter.lower())
+    return {"count": count}
+
+
+def check_ends_with(text: str, phrase: str) -> dict:
+    passed = text.strip().endswith(phrase)
+    detail = "ok" if passed else f"ends with: '...{text.strip()[-40:]}'"
+    return {"passed": passed, "detail": detail}
+
+
+def check_starts_with_prompt(text: str, prompt: str) -> dict:
+    passed = text.strip().startswith(prompt.strip())
+    detail = "ok" if passed else f"starts with: '{text.strip()[:40]}'"
+    return {"passed": passed, "detail": detail}
+
+
+def check_quotation(text: str) -> dict:
+    s = text.strip()
+    passed = s.startswith('"') and s.endswith('"')
+    detail = "ok" if passed else "response not wrapped in double quotes"
+    return {"passed": passed, "detail": detail}
+
+
+SKILL_MAP = {
+    "count_words":                count_words,
+    "check_keywords":             check_keywords,
+    "check_no_comma":             check_no_comma,
+    "count_highlighted_sections": count_highlighted_sections,
+    "count_placeholders":         count_placeholders,
+    "check_title_format":         check_title_format,
+    "check_case":                 check_case,
+    "count_bullets":              count_bullets,
+    "count_sections":             count_sections,
+    "count_capital_words":        count_capital_words,
+    "check_starts_with_prompt":   check_starts_with_prompt,
+    "check_quotation":            check_quotation,
+    "check_json_format":          check_json_format,
+    "count_paragraphs":           count_paragraphs,
+    "check_two_responses":        check_two_responses,
+    "count_letter_frequency":     count_letter_frequency,
+    "check_ends_with":            check_ends_with,
+}
+
+with open(SKILLS_FILE) as f:
+    SKILL_DESCRIPTIONS = f.read().strip()
+
+
+# ── Ollama caller ──────────────────────────────────────────────────────────────
+
+def call_ollama(model: str, messages: list) -> str:
+    payload = {"model": model, "messages": messages, "stream": False}
+    data = json.dumps(payload).encode()
+    req = urllib.request.Request(
+        f"{OLLAMA_URL}/api/chat",
+        data=data,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    with urllib.request.urlopen(req, timeout=60) as resp:
+        return json.loads(resp.read())["message"]["content"]
+
+
+TOOL_CALL_RE = re.compile(r"<tool_call>(.*?)</tool_call>", re.DOTALL)
+
+
+def execute_tool_call(raw: str) -> str:
+    try:
+        call = json.loads(raw)
+        fn_name = call["name"]
+        fn_args = call.get("args", {})
+        fn = SKILL_MAP.get(fn_name)
+        if fn is None:
+            return json.dumps({"error": f"unknown skill: {fn_name}"})
+        result = fn(**fn_args)
+        print(f"    [skill] {fn_name} → {result}")
+        return json.dumps(result)
+    except Exception as exc:
+        return json.dumps({"error": str(exc)})
+
+
+def run_agent(model: str, user_prompt: str, max_rounds: int = 3) -> str:
+    messages = [
+        {"role": "system", "content": SKILL_DESCRIPTIONS.strip()},
+        {"role": "user", "content": user_prompt},
+    ]
+    for _ in range(max_rounds):
+        reply = call_ollama(model, messages)
+        tool_calls = TOOL_CALL_RE.findall(reply)
+        if not tool_calls:
+            return reply.strip()
+        result_blocks = "\n".join(
+            f"<tool_result>{execute_tool_call(tc)}</tool_result>"
+            for tc in tool_calls
+        )
+        messages.append({"role": "assistant", "content": reply})
+        messages.append({"role": "user", "content": result_blocks})
+    return reply.strip()
+
+
+# ── Validators ─────────────────────────────────────────────────────────────────
+
+def validate_keywords_no_bullets(response: str) -> tuple:
+    required = ["carbon", "renewable", "future"]
+    r_lower = response.lower()
+    missing = [k for k in required if k not in r_lower]
+    has_bullets = any(
+        line.strip().startswith(("-", "*", "•")) for line in response.splitlines()
+    )
+    passed = not missing and not has_bullets
+    detail = f"missing={missing}" if missing else ("bullets found" if has_bullets else "ok")
+    return passed, detail
+
+
+def validate_numbered_list_3(response: str) -> tuple:
+    lines = [l.strip() for l in response.splitlines() if l.strip()]
+    numbered = [l for l in lines if len(l) > 2 and l[:2] in ("1.", "2.", "3.")]
+    correct_count = len(numbered) == 3
+    all_end_period = bool(numbered) and all(l.rstrip().endswith(".") for l in numbered)
+    passed = correct_count and all_end_period
+    detail = f"items={len(numbered)}, end_period={all_end_period}"
+    return passed, detail
+
+
+def validate_two_sentences(response: str) -> tuple:
+    clean = TOOL_CALL_RE.sub("", response).strip()
+    sentences = [s.strip() for s in re.split(r"(?<=[.!?])\s+", clean) if s.strip()]
+    passed = len(sentences) == 2
+    detail = f"sentences={len(sentences)}"
+    return passed, detail
+
+
+def validate_ends_with_phrase(response: str) -> tuple:
+    phrase = "This is the essence of neural networks."
+    passed = response.rstrip().endswith(phrase)
+    detail = "ok" if passed else f"ends with: '{response.rstrip()[-40:]}'"
+    return passed, detail
+
+
+def validate_min_words(response: str) -> tuple:
+    wc = len(response.split())
+    passed = wc >= 50
+    detail = f"words={wc} (need ≥50)"
+    return passed, detail
+
+
+def validate_forbidden_word(response: str) -> tuple:
+    forbidden = "force"
+    found = forbidden.lower() in response.lower()
+    passed = not found
+    detail = "ok" if passed else f"'{forbidden}' found in response"
+    return passed, detail
+
+
+# ── IFEval tasks ───────────────────────────────────────────────────────────────
+
+IFEVAL_TASKS = [
+    {
+        "id": "T1",
+        "constraint": "Keywords (carbon,renewable,future) + no bullets",
+        "instruction": (
+            "Write a short paragraph (3–5 sentences) about climate change. "
+            "Your response MUST include the words 'carbon', 'renewable', and 'future' at least once each. "
+            "Do NOT use any bullet points or numbered lists in your final answer. "
+            "You may use the check_keywords skill on your draft before finalising."
+        ),
+        "validator": validate_keywords_no_bullets,
+    },
+    {
+        "id": "T2",
+        "constraint": "Exactly 3 numbered items, each ends with '.'",
+        "instruction": (
+            "List exactly 3 advantages of remote work. "
+            "Format your answer as a numbered list using '1.', '2.', '3.'. "
+            "Each item must be a single sentence ending with a period. "
+            "You may use the count_words skill to check your response."
+        ),
+        "validator": validate_numbered_list_3,
+    },
+    {
+        "id": "T3",
+        "constraint": "Exactly 2 sentences about the moon",
+        "instruction": (
+            "Write exactly 2 sentences about the moon. "
+            "Your response must be exactly 2 sentences — no more, no less. "
+            "Do not use bullet points or lists."
+        ),
+        "validator": validate_two_sentences,
+    },
+    {
+        "id": "T4",
+        "constraint": "Must end with exact phrase",
+        "instruction": (
+            "Explain what a neural network is in 3–5 sentences. "
+            "Your response MUST end with this exact phrase: "
+            "'This is the essence of neural networks.'"
+        ),
+        "validator": validate_ends_with_phrase,
+    },
+    {
+        "id": "T5",
+        "constraint": "At least 50 words about space exploration",
+        "instruction": (
+            "Write a paragraph about space exploration. "
+            "Your response must be at least 50 words long. "
+            "You may use the count_words skill to verify your word count before finalising."
+        ),
+        "validator": validate_min_words,
+    },
+    {
+        "id": "T6",
+        "constraint": "Describe gravity without using 'force'",
+        "instruction": (
+            "Describe the concept of gravity in 2–4 sentences. "
+            "You must NOT use the word 'force' anywhere in your response. "
+            "You may use the check_keywords skill to verify the word is absent."
+        ),
+        "validator": validate_forbidden_word,
+    },
+]
+
+
+# ── Grid printer ───────────────────────────────────────────────────────────────
+
+def print_grid(results: dict, tasks: list = None):
+    COL_TASK   = 4
+    COL_CONSTR = 42
+    COL_MODEL  = 14
+
+    models = list(results.keys())
+
+    def pad(s, w):
+        return str(s)[:w].ljust(w)
+
+    sep_widths = [COL_TASK, COL_CONSTR] + [COL_MODEL] * len(models)
+    total = sum(sep_widths) + len(sep_widths) * 3 + 1
+
+    def hline(left="├", mid="┼", right="┤", fill="─"):
+        parts = [fill * (w + 2) for w in sep_widths]
+        print(left + mid.join(parts) + right)
+
+    def row(*cells):
+        parts = [f" {pad(c, w)} " for c, w in zip(cells, sep_widths)]
+        print("│" + "│".join(parts) + "│")
+
+    print()
+    print("┌" + "─" * (total - 2) + "┐")
+    print("│" + "IFEval Results  (with skills)".center(total - 2) + "│")
+    hline("├", "┬", "┤")
+    row("Task", "Constraint", *models)
+    hline("├", "┼", "┤")
+
+    task_list = tasks or IFEVAL_TASKS
+    scores = {m: 0 for m in models}
+    for task in task_list:
+        tid = task["id"]
+        cells = [tid, task["constraint"]]
+        for m in models:
+            passed, detail = results[m][tid]
+            if passed:
+                scores[m] += 1
+            cells.append(f"{'PASS' if passed else 'FAIL'}  {detail}"[:COL_MODEL])
+        row(*cells)
+
+    hline("├", "┼", "┤")
+    n = len(task_list)
+    row("", "Score", *[f"{scores[m]}/{n} ({int(100*scores[m]/n)}%)" for m in models])
+    print("└" + "─" * (total - 2) + "┘")
+    print()
+
+
+# ── Evaluate / Runner ──────────────────────────────────────────────────────────
+
+def evaluate(model: str, tasks: list = None) -> dict:
+    """Run all tasks for one model. Returns {task_id: (passed, detail)}."""
+    tasks = tasks or IFEVAL_TASKS
+    results = {}
+    for task in tasks:
+        try:
+            response = run_agent(model, task["instruction"])
+            passed, detail = task["validator"](response)
+        except Exception as e:
+            passed, detail = False, f"error: {str(e)[:30]}"
+        results[task["id"]] = (passed, detail)
+        print(f"    [{task['id']}] [{'PASS' if passed else 'FAIL'}] {detail}")
+    return results
+
+
+def run_all(tasks: list = None):
+    tasks = tasks or IFEVAL_TASKS
+    models = get_models()
+    print(f"  Models found: {models}")
+    results = {}
+
+    for model in models:
+        print(f"\n{'='*60}")
+        print(f" Running model: {model}  [with skills]")
+        print(f"{'='*60}")
+        results[model] = evaluate(model, tasks)
+
+    print_grid(results, tasks)
+
+
+if __name__ == "__main__":
+    run_all()

@@ -1,199 +1,159 @@
 """
-IFEval (Instruction Following Evaluation) runner with ollama + skills (ReAct-style tool use).
+Unified IFEval runner.
 
-Skills (count_words, check_keywords) are injected into the system prompt.
-The model can invoke them via a JSON tool-call marker; the agent loop
-executes each call and feeds results back before the model gives its final answer.
+For every model installed in ollama, runs all tasks twice:
+  - without skills (direct prompt)
+  - with skills    (ReAct agent loop)
 
-Two IFEval tasks are included, each with a verifiable constraint validator.
+Prints a per-model comparison grid, then a final summary across all models.
+
+  python main.py          # run everything
+  python main.py no_skills
+  python main.py skills
 """
 
-import json
-import re
-import urllib.request
+import sys
+import run_no_skills
+import run_with_skills
+import ifeval_loader
 
-OLLAMA_URL = "http://localhost:11434"
-MODEL = "llama3:8b"
-
-# ── Skills ─────────────────────────────────────────────────────────────────────
-
-def count_words(text: str) -> dict:
-    words = text.split()
-    return {"word_count": len(words), "char_count": len(text)}
+HF_TASK_COUNT    = 20   # number of real IFEval tasks to pull from HuggingFace
+USE_CUSTOM_TASKS = False  # set True to re-enable hand-crafted tasks
+PAUSED_MODELS    = {"llama3:8b", "qwen2.5:3b", "qwen3:1.7b"}
 
 
-def check_keywords(text: str, keywords: list) -> dict:
-    text_lower = text.lower()
-    found = [k for k in keywords if k.lower() in text_lower]
-    missing = [k for k in keywords if k.lower() not in text_lower]
-    return {"found": found, "missing": missing, "all_present": len(missing) == 0}
+def get_models():
+    return [m for m in run_no_skills.get_models() if m not in PAUSED_MODELS]
 
 
-SKILL_MAP = {
-    "count_words": count_words,
-    "check_keywords": check_keywords,
-}
-
-SKILL_DESCRIPTIONS = """
-You have access to two skills you may call before writing your final answer.
-To call a skill, output a JSON block with the marker exactly like this:
-
-<tool_call>{"name": "count_words", "args": {"text": "some text"}}</tool_call>
-
-Available skills:
-1. count_words(text: str)  →  {"word_count": int, "char_count": int}
-   Use this to verify that your draft meets a word-count requirement.
-
-2. check_keywords(text: str, keywords: [str])  →  {"found": [...], "missing": [...], "all_present": bool}
-   Use this to verify that required keywords appear in your draft.
-
-After seeing the skill result (provided as <tool_result>...</tool_result>), revise if needed
-and write your final answer. Do not include any <tool_call> markers in your final answer.
-"""
+def build_tasks():
+    hf_tasks = ifeval_loader.load_ifeval_tasks(n=HF_TASK_COUNT)
+    custom   = run_no_skills.IFEVAL_TASKS if USE_CUSTOM_TASKS else []
+    return custom + hf_tasks
 
 
-# ── Ollama caller ──────────────────────────────────────────────────────────────
+# ── Grid helpers ───────────────────────────────────────────────────────────────
 
-def call_ollama(messages: list) -> str:
-    payload = {"model": MODEL, "messages": messages, "stream": False}
-    data = json.dumps(payload).encode()
-    req = urllib.request.Request(
-        f"{OLLAMA_URL}/api/chat",
-        data=data,
-        headers={"Content-Type": "application/json"},
-        method="POST",
-    )
-    with urllib.request.urlopen(req, timeout=180) as resp:
-        return json.loads(resp.read())["message"]["content"]
+def _pad(s, w):
+    return str(s)[:w].ljust(w)
 
 
-def execute_tool_call(raw: str) -> str:
-    """Parse and run a single <tool_call>...</tool_call> block."""
-    try:
-        call = json.loads(raw)
-        fn_name = call["name"]
-        fn_args = call.get("args", {})
-        fn = SKILL_MAP.get(fn_name)
-        if fn is None:
-            return json.dumps({"error": f"unknown skill: {fn_name}"})
-        result = fn(**fn_args)
-        print(f"  [skill] {fn_name}({fn_args}) → {result}")
-        return json.dumps(result)
-    except Exception as exc:
-        return json.dumps({"error": str(exc)})
+def _hline(widths, left="├", mid="┼", right="┤", fill="─"):
+    parts = [fill * (w + 2) for w in widths]
+    print(left + mid.join(parts) + right)
 
 
-# ── Agent loop ─────────────────────────────────────────────────────────────────
+def _row(widths, *cells):
+    parts = [f" {_pad(c, w)} " for c, w in zip(cells, widths)]
+    print("│" + "│".join(parts) + "│")
 
-TOOL_CALL_RE = re.compile(r"<tool_call>(.*?)</tool_call>", re.DOTALL)
 
-def run_agent(user_prompt: str, max_rounds: int = 5) -> str:
-    """
-    ReAct-style agent loop:
-    1. Model responds with optional <tool_call> blocks.
-    2. We execute each skill and inject <tool_result> back.
-    3. Repeat until the model produces a response with no tool calls.
-    """
-    system_msg = {"role": "system", "content": SKILL_DESCRIPTIONS.strip()}
-    messages = [system_msg, {"role": "user", "content": user_prompt}]
+# ── Per-model comparison grid ──────────────────────────────────────────────────
 
-    for _ in range(max_rounds):
-        reply = call_ollama(messages)
+def print_model_grid(model: str, no_skill: dict, with_skill: dict, tasks: list):
+    """Side-by-side no-skills vs with-skills for one model."""
+    W_TASK   = 8
+    W_CONSTR = 42
+    W_COL    = 16
+    widths   = [W_TASK, W_CONSTR, W_COL, W_COL]
+    total    = sum(widths) + len(widths) * 3 + 1
 
-        tool_calls = TOOL_CALL_RE.findall(reply)
-        if not tool_calls:
-            # No tool invocations — this is the final answer
-            return reply.strip()
+    print()
+    print("┌" + "─" * (total - 2) + "┐")
+    print("│" + f"  {model}".ljust(total - 2) + "│")
+    _hline(widths, "├", "┬", "┤")
+    _row(widths, "Task", "Constraint", "No Skills", "With Skills")
+    _hline(widths, "├", "┼", "┤")
 
-        # Build assistant turn with results injected
-        result_blocks = "\n".join(
-            f"<tool_result>{execute_tool_call(tc)}</tool_result>"
-            for tc in tool_calls
+    for task in tasks:
+        tid = task["id"]
+        p0, d0 = no_skill[tid]
+        p1, d1 = with_skill[tid]
+        _row(
+            widths,
+            tid,
+            task["constraint"],
+            f"{'PASS' if p0 else 'FAIL'}  {d0}"[:W_COL],
+            f"{'PASS' if p1 else 'FAIL'}  {d1}"[:W_COL],
         )
-        messages.append({"role": "assistant", "content": reply})
-        messages.append({"role": "user", "content": result_blocks})
 
-    return reply.strip()
-
-
-# ── IFEval validators ──────────────────────────────────────────────────────────
-
-def validate_task1(response: str) -> dict:
-    """Keywords: carbon, renewable, future — no bullet points."""
-    required = ["carbon", "renewable", "future"]
-    r_lower = response.lower()
-    missing = [k for k in required if k not in r_lower]
-    has_bullets = any(
-        line.strip().startswith(("-", "*", "•")) for line in response.splitlines()
-    )
-    return {
-        "passed": not missing and not has_bullets,
-        "missing_keywords": missing,
-        "has_bullet_points": has_bullets,
-    }
+    n  = len(tasks)
+    s0 = sum(1 for t in tasks if no_skill[t["id"]][0])
+    s1 = sum(1 for t in tasks if with_skill[t["id"]][0])
+    _hline(widths, "├", "┼", "┤")
+    _row(widths, "", "Score",
+         f"{s0}/{n} ({int(100*s0/n)}%)",
+         f"{s1}/{n} ({int(100*s1/n)}%)")
+    print("└" + "─" * (total - 2) + "┘")
 
 
-def validate_task2(response: str) -> dict:
-    """Exactly 3 numbered items (1. 2. 3.), each ending with a period."""
-    lines = [l.strip() for l in response.splitlines() if l.strip()]
-    numbered = [l for l in lines if len(l) > 2 and l[:2] in ("1.", "2.", "3.")]
-    correct_count = len(numbered) == 3
-    all_end_period = bool(numbered) and all(l.rstrip().endswith(".") for l in numbered)
-    return {
-        "passed": correct_count and all_end_period,
-        "numbered_items_found": len(numbered),
-        "all_end_with_period": all_end_period,
-    }
+# ── Summary grid ───────────────────────────────────────────────────────────────
+
+def print_summary_grid(all_results: dict, tasks: list):
+    """One row per model, columns: no-skills score | with-skills score."""
+    W_MODEL = 20
+    W_COL   = 16
+    widths  = [W_MODEL, W_COL, W_COL]
+    total   = sum(widths) + len(widths) * 3 + 1
+    n       = len(tasks)
+
+    print()
+    print("┌" + "─" * (total - 2) + "┐")
+    print("│" + "Summary — All Models".center(total - 2) + "│")
+    _hline(widths, "├", "┬", "┤")
+    _row(widths, "Model", "No Skills", "With Skills")
+    _hline(widths, "├", "┼", "┤")
+
+    for model, (no_skill, with_skill) in all_results.items():
+        s0 = sum(1 for t in tasks if no_skill[t["id"]][0])
+        s1 = sum(1 for t in tasks if with_skill[t["id"]][0])
+        _row(widths, model,
+             f"{s0}/{n} ({int(100*s0/n)}%)",
+             f"{s1}/{n} ({int(100*s1/n)}%)")
+
+    print("└" + "─" * (total - 2) + "┘")
+    print()
 
 
-# ── IFEval task definitions ────────────────────────────────────────────────────
+# ── Main runner ────────────────────────────────────────────────────────────────
 
-IFEVAL_TASKS = [
-    {
-        "id": "ifeval_001",
-        "description": "Keywords: carbon, renewable, future — no bullet points",
-        "instruction": (
-            "Write a short paragraph (3–5 sentences) about climate change. "
-            "Your response MUST include the words 'carbon', 'renewable', and 'future' at least once each. "
-            "Do NOT use any bullet points or numbered lists in your final answer. "
-            "You may use the check_keywords skill on your draft before finalising."
-        ),
-        "validator": validate_task1,
-    },
-    {
-        "id": "ifeval_002",
-        "description": "Exactly 3 numbered items, each a single sentence ending with '.'",
-        "instruction": (
-            "List exactly 3 advantages of remote work. "
-            "Format your answer as a numbered list using '1.', '2.', '3.'. "
-            "Each item must be a single sentence ending with a period. "
-            "You may use the count_words skill to check your response length."
-        ),
-        "validator": validate_task2,
-    },
-]
+def run_all():
+    models = get_models()
+    tasks  = build_tasks()
+    print(f"\nModels found : {models}")
+    print(f"Tasks loaded : {len(tasks)} ({len(run_no_skills.IFEVAL_TASKS)} custom + {len(tasks) - len(run_no_skills.IFEVAL_TASKS)} from HuggingFace)\n")
 
+    mode = sys.argv[1] if len(sys.argv) > 1 else "both"
+    all_results = {}  # {model: (no_skill_dict, with_skill_dict)}
 
-# ── Runner ─────────────────────────────────────────────────────────────────────
+    for model in models:
+        print(f"\n{'━'*60}")
+        print(f"  {model}")
+        print(f"{'━'*60}")
 
-def run_ifeval_tasks():
-    print(f"Model : {MODEL}")
-    print(f"Skills: {list(SKILL_MAP.keys())}")
-    print("=" * 60)
+        if mode in ("no_skills", "both"):
+            print("\n  [without skills]")
+            no_skill = run_no_skills.evaluate(model, tasks)
+        else:
+            no_skill = {t["id"]: (False, "skipped") for t in tasks}
 
-    for task in IFEVAL_TASKS:
-        print(f"\nTask  : {task['id']}  —  {task['description']}")
-        print(f"Prompt: {task['instruction']}\n")
+        if mode in ("skills", "both"):
+            print("\n  [with skills]")
+            with_skill = run_with_skills.evaluate(model, tasks)
+        else:
+            with_skill = {t["id"]: (False, "skipped") for t in tasks}
 
-        response = run_agent(task["instruction"])
+        all_results[model] = (no_skill, with_skill)
 
-        print(f"Response:\n{response}\n")
+    print("\n" + "═" * 60)
+    print("  Results")
+    print("═" * 60)
 
-        result = task["validator"](response)
-        status = "PASS" if result["passed"] else "FAIL"
-        print(f"Validation [{status}]: {result}")
-        print("-" * 60)
+    for model, (no_skill, with_skill) in all_results.items():
+        print_model_grid(model, no_skill, with_skill, tasks)
+
+    print_summary_grid(all_results, tasks)
 
 
 if __name__ == "__main__":
-    run_ifeval_tasks()
+    run_all()
