@@ -1,19 +1,19 @@
 """
-IFEval runner WITH skills — ReAct-style agent loop.
+IFEval runner WITH skills — structured tool calling (Anthropic-style).
 
-Skills (count_words, check_keywords) are injected via system prompt.
-The model signals tool calls via <tool_call> JSON blocks; the agent loop
-executes each skill and feeds results back before the model gives its final answer.
+Skills are defined as JSON schemas and passed to ollama's native tool-calling
+API. The model returns structured tool_calls; the agent loop executes each
+skill and feeds results back as role:tool messages.
+
+Models that don't support tool calling are skipped gracefully.
+skills.md is retained as human-readable documentation only.
 """
 
 import json
-import os
 import re
 import urllib.request
 
 OLLAMA_URL = "http://localhost:11434"
-
-SKILLS_FILE = os.path.join(os.path.dirname(__file__), "skills.md")
 
 
 def get_models() -> list:
@@ -146,14 +146,61 @@ SKILL_MAP = {
     "check_ends_with":            check_ends_with,
 }
 
-with open(SKILLS_FILE) as f:
-    SKILL_DESCRIPTIONS = f.read().strip()
+# ── Tool definitions (JSON schema) ─────────────────────────────────────────────
+# Authoritative skill definitions — skills.md is human-readable docs of these.
+
+def _tool(name, description, properties, required):
+    return {
+        "type": "function",
+        "function": {
+            "name": name,
+            "description": description,
+            "parameters": {
+                "type": "object",
+                "properties": properties,
+                "required": required,
+            },
+        },
+    }
+
+_str  = {"type": "string"}
+_int  = {"type": "integer"}
+_list = {"type": "array", "items": {"type": "string"}}
+
+SKILL_DEFINITIONS = [
+    _tool("count_words",               "Count words and characters in text.",                                      {"text": _str}, ["text"]),
+    _tool("check_keywords",            "Check which keywords are present or missing in text.",                     {"text": _str, "keywords": _list}, ["text", "keywords"]),
+    _tool("check_no_comma",            "Check that text contains no commas.",                                      {"text": _str}, ["text"]),
+    _tool("count_highlighted_sections","Count *highlighted* sections (markdown italics) in text.",                 {"text": _str}, ["text"]),
+    _tool("count_placeholders",        "Count [placeholder] patterns in text.",                                    {"text": _str}, ["text"]),
+    _tool("check_title_format",        "Check that text contains a <<Title>> marker.",                             {"text": _str}, ["text"]),
+    _tool("check_case",                "Check letter casing. case must be 'lower' or 'upper'.",                   {"text": _str, "case": _str}, ["text", "case"]),
+    _tool("count_bullets",             "Count bullet list items (lines starting with -, *, or •).",               {"text": _str}, ["text"]),
+    _tool("count_sections",            "Count sections that begin with a given splitter word.",                    {"text": _str, "splitter": _str}, ["text", "splitter"]),
+    _tool("count_capital_words",       "Count words that are entirely UPPERCASE.",                                 {"text": _str}, ["text"]),
+    _tool("check_starts_with_prompt",  "Check that text begins by repeating the original prompt.",                 {"text": _str, "prompt": _str}, ["text", "prompt"]),
+    _tool("check_quotation",           "Check that text is wrapped in double quotation marks.",                    {"text": _str}, ["text"]),
+    _tool("check_json_format",         "Check that text is valid JSON.",                                           {"text": _str}, ["text"]),
+    _tool("count_paragraphs",          "Count paragraphs (blocks separated by blank lines).",                     {"text": _str}, ["text"]),
+    _tool("check_two_responses",       "Check that text contains two responses divided by ****** .",              {"text": _str}, ["text"]),
+    _tool("count_letter_frequency",    "Count occurrences of a specific letter (case-insensitive).",              {"text": _str, "letter": _str}, ["text", "letter"]),
+    _tool("check_ends_with",           "Check that text ends with an exact phrase.",                              {"text": _str, "phrase": _str}, ["text", "phrase"]),
+]
 
 
 # ── Ollama caller ──────────────────────────────────────────────────────────────
 
-def call_ollama(model: str, messages: list) -> str:
-    payload = {"model": model, "messages": messages, "stream": False}
+DEBUG = True  # set False to silence debug output
+
+
+def _dbg(msg: str):
+    if DEBUG:
+        print(f"    [debug] {msg}")
+
+
+def _call_ollama(model: str, messages: list, tools: list) -> dict:
+    """Returns the raw message dict from ollama (may contain tool_calls)."""
+    payload = {"model": model, "messages": messages, "tools": tools, "stream": False}
     data = json.dumps(payload).encode()
     req = urllib.request.Request(
         f"{OLLAMA_URL}/api/chat",
@@ -162,61 +209,62 @@ def call_ollama(model: str, messages: list) -> str:
         method="POST",
     )
     with urllib.request.urlopen(req, timeout=60) as resp:
-        return json.loads(resp.read())["message"]["content"]
+        return json.loads(resp.read())["message"]
 
 
-TOOL_CALL_RE = re.compile(r"<tool_call>(.*?)</tool_call>", re.DOTALL)
-
-
-DEBUG = True  # set False to silence skill debug output
-
-
-def _dbg(msg: str):
-    if DEBUG:
-        print(f"    [debug] {msg}")
-
-
-def execute_tool_call(raw: str) -> str:
-    _dbg(f"raw tool_call received: {raw[:120]}")
+def _execute(fn_name: str, fn_args: dict) -> str:
+    _dbg(f"skill call → {fn_name}({fn_args})")
+    fn = SKILL_MAP.get(fn_name)
+    if fn is None:
+        _dbg(f"UNKNOWN skill '{fn_name}' — available: {list(SKILL_MAP.keys())}")
+        return json.dumps({"error": f"unknown skill: {fn_name}"})
     try:
-        call = json.loads(raw)
-        fn_name = call["name"]
-        fn_args = call.get("args", {})
-        _dbg(f"parsed  → name={fn_name!r}  args={fn_args}")
-        fn = SKILL_MAP.get(fn_name)
-        if fn is None:
-            _dbg(f"UNKNOWN skill '{fn_name}' — available: {list(SKILL_MAP.keys())}")
-            return json.dumps({"error": f"unknown skill: {fn_name}"})
         result = fn(**fn_args)
-        _dbg(f"result  → {result}")
+        _dbg(f"result    → {result}")
         return json.dumps(result)
     except Exception as exc:
-        _dbg(f"ERROR executing tool_call: {exc}")
+        _dbg(f"ERROR     → {exc}")
         return json.dumps({"error": str(exc)})
 
 
+def supports_tools(model: str) -> bool:
+    """Quick probe — returns True if model accepts tools without error."""
+    try:
+        probe = [{"role": "user", "content": "hi"}]
+        _call_ollama(model, probe, SKILL_DEFINITIONS[:1])
+        return True
+    except Exception:
+        return False
+
+
 def run_agent(model: str, user_prompt: str, max_rounds: int = 3) -> str:
-    messages = [
-        {"role": "system", "content": SKILL_DESCRIPTIONS.strip()},
-        {"role": "user", "content": user_prompt},
-    ]
+    messages = [{"role": "user", "content": user_prompt}]
+
     for round_num in range(max_rounds):
         _dbg(f"round {round_num + 1}/{max_rounds} — calling {model}")
-        reply = call_ollama(model, messages)
-        _dbg(f"reply preview: {reply[:120].replace(chr(10), ' ')}")
-        tool_calls = TOOL_CALL_RE.findall(reply)
-        _dbg(f"tool_calls found: {len(tool_calls)}")
+        msg = _call_ollama(model, messages, SKILL_DEFINITIONS)
+
+        tool_calls = msg.get("tool_calls") or []
+        _dbg(f"tool_calls received: {len(tool_calls)}")
+
         if not tool_calls:
-            _dbg("no tool calls — returning final answer")
-            return reply.strip()
-        result_blocks = "\n".join(
-            f"<tool_result>{execute_tool_call(tc)}</tool_result>"
-            for tc in tool_calls
-        )
-        messages.append({"role": "assistant", "content": reply})
-        messages.append({"role": "user", "content": result_blocks})
-    _dbg("max rounds reached — returning last reply")
-    return reply.strip()
+            _dbg("no tool calls — final answer")
+            return (msg.get("content") or "").strip()
+
+        # Append assistant turn then execute each tool call
+        messages.append({"role": "assistant", "content": msg.get("content") or "", "tool_calls": tool_calls})
+        for tc in tool_calls:
+            fn_name = tc["function"]["name"]
+            fn_args = tc["function"].get("arguments", {})
+            if isinstance(fn_args, str):
+                fn_args = json.loads(fn_args)
+            messages.append({
+                "role":    "tool",
+                "content": _execute(fn_name, fn_args),
+            })
+
+    _dbg("max rounds reached — returning last content")
+    return (msg.get("content") or "").strip()
 
 
 # ── Validators ─────────────────────────────────────────────────────────────────
@@ -395,6 +443,11 @@ def print_grid(results: dict, tasks: list = None):
 def evaluate(model: str, tasks: list = None) -> dict:
     """Run all tasks for one model. Returns {task_id: (passed, detail)}."""
     tasks = tasks or IFEVAL_TASKS
+
+    if not supports_tools(model):
+        print(f"    [SKIP] {model} does not support tool calling")
+        return {t["id"]: (False, "tools unsupported") for t in tasks}
+
     results = {}
     for task in tasks:
         try:
