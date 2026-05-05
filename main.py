@@ -1,11 +1,11 @@
 """
 IFEval (Instruction Following Evaluation) runner with ollama + skills (ReAct-style tool use).
 
-Skills (count_words, check_keywords) are injected into the system prompt.
-The model can invoke them via a JSON tool-call marker; the agent loop
-executes each call and feeds results back before the model gives its final answer.
+Skills (count_words, check_keywords) are injected via system prompt.
+The model can invoke them via <tool_call> JSON blocks; the agent loop executes
+each call and feeds results back before the model gives its final answer.
 
-Two IFEval tasks are included, each with a verifiable constraint validator.
+Runs all tasks across multiple models and prints a comparison grid.
 """
 
 import json
@@ -13,7 +13,8 @@ import re
 import urllib.request
 
 OLLAMA_URL = "http://localhost:11434"
-MODEL = "llama3:8b"
+MODELS = ["llama3:8b", "qwen2.5:3b"]
+
 
 # ── Skills ─────────────────────────────────────────────────────────────────────
 
@@ -42,20 +43,20 @@ To call a skill, output a JSON block with the marker exactly like this:
 
 Available skills:
 1. count_words(text: str)  →  {"word_count": int, "char_count": int}
-   Use this to verify that your draft meets a word-count requirement.
+   Use this to verify your draft meets a word-count requirement.
 
 2. check_keywords(text: str, keywords: [str])  →  {"found": [...], "missing": [...], "all_present": bool}
-   Use this to verify that required keywords appear in your draft.
+   Use this to verify required keywords appear in your draft.
 
 After seeing the skill result (provided as <tool_result>...</tool_result>), revise if needed
-and write your final answer. Do not include any <tool_call> markers in your final answer.
+and write your final answer. Do NOT include any <tool_call> markers in your final answer.
 """
 
 
 # ── Ollama caller ──────────────────────────────────────────────────────────────
 
-def call_ollama(messages: list) -> str:
-    payload = {"model": MODEL, "messages": messages, "stream": False}
+def call_ollama(model: str, messages: list) -> str:
+    payload = {"model": model, "messages": messages, "stream": False}
     data = json.dumps(payload).encode()
     req = urllib.request.Request(
         f"{OLLAMA_URL}/api/chat",
@@ -67,8 +68,7 @@ def call_ollama(messages: list) -> str:
         return json.loads(resp.read())["message"]["content"]
 
 
-def execute_tool_call(raw: str) -> str:
-    """Parse and run a single <tool_call>...</tool_call> block."""
+def execute_tool_call(raw: str, verbose: bool = False) -> str:
     try:
         call = json.loads(raw)
         fn_name = call["name"]
@@ -77,7 +77,8 @@ def execute_tool_call(raw: str) -> str:
         if fn is None:
             return json.dumps({"error": f"unknown skill: {fn_name}"})
         result = fn(**fn_args)
-        print(f"  [skill] {fn_name}({fn_args}) → {result}")
+        if verbose:
+            print(f"    [skill] {fn_name} → {result}")
         return json.dumps(result)
     except Exception as exc:
         return json.dumps({"error": str(exc)})
@@ -87,27 +88,19 @@ def execute_tool_call(raw: str) -> str:
 
 TOOL_CALL_RE = re.compile(r"<tool_call>(.*?)</tool_call>", re.DOTALL)
 
-def run_agent(user_prompt: str, max_rounds: int = 5) -> str:
-    """
-    ReAct-style agent loop:
-    1. Model responds with optional <tool_call> blocks.
-    2. We execute each skill and inject <tool_result> back.
-    3. Repeat until the model produces a response with no tool calls.
-    """
+
+def run_agent(model: str, user_prompt: str, max_rounds: int = 5) -> str:
     system_msg = {"role": "system", "content": SKILL_DESCRIPTIONS.strip()}
     messages = [system_msg, {"role": "user", "content": user_prompt}]
 
     for _ in range(max_rounds):
-        reply = call_ollama(messages)
-
+        reply = call_ollama(model, messages)
         tool_calls = TOOL_CALL_RE.findall(reply)
         if not tool_calls:
-            # No tool invocations — this is the final answer
             return reply.strip()
 
-        # Build assistant turn with results injected
         result_blocks = "\n".join(
-            f"<tool_result>{execute_tool_call(tc)}</tool_result>"
+            f"<tool_result>{execute_tool_call(tc, verbose=True)}</tool_result>"
             for tc in tool_calls
         )
         messages.append({"role": "assistant", "content": reply})
@@ -116,84 +109,211 @@ def run_agent(user_prompt: str, max_rounds: int = 5) -> str:
     return reply.strip()
 
 
-# ── IFEval validators ──────────────────────────────────────────────────────────
+# ── Validators ─────────────────────────────────────────────────────────────────
 
-def validate_task1(response: str) -> dict:
-    """Keywords: carbon, renewable, future — no bullet points."""
+def validate_keywords_no_bullets(response: str) -> tuple:
     required = ["carbon", "renewable", "future"]
     r_lower = response.lower()
     missing = [k for k in required if k not in r_lower]
     has_bullets = any(
         line.strip().startswith(("-", "*", "•")) for line in response.splitlines()
     )
-    return {
-        "passed": not missing and not has_bullets,
-        "missing_keywords": missing,
-        "has_bullet_points": has_bullets,
-    }
+    passed = not missing and not has_bullets
+    detail = f"missing={missing}" if missing else ("bullets found" if has_bullets else "ok")
+    return passed, detail
 
 
-def validate_task2(response: str) -> dict:
-    """Exactly 3 numbered items (1. 2. 3.), each ending with a period."""
+def validate_numbered_list_3(response: str) -> tuple:
     lines = [l.strip() for l in response.splitlines() if l.strip()]
     numbered = [l for l in lines if len(l) > 2 and l[:2] in ("1.", "2.", "3.")]
     correct_count = len(numbered) == 3
     all_end_period = bool(numbered) and all(l.rstrip().endswith(".") for l in numbered)
-    return {
-        "passed": correct_count and all_end_period,
-        "numbered_items_found": len(numbered),
-        "all_end_with_period": all_end_period,
-    }
+    passed = correct_count and all_end_period
+    detail = f"items={len(numbered)}, end_period={all_end_period}"
+    return passed, detail
+
+
+def validate_two_sentences(response: str) -> tuple:
+    # Strip any tool markers that may have leaked into final answer
+    clean = TOOL_CALL_RE.sub("", response).strip()
+    sentences = [s.strip() for s in re.split(r"(?<=[.!?])\s+", clean) if s.strip()]
+    passed = len(sentences) == 2
+    detail = f"sentences={len(sentences)}"
+    return passed, detail
+
+
+def validate_ends_with_phrase(response: str) -> tuple:
+    phrase = "This is the essence of neural networks."
+    passed = response.rstrip().endswith(phrase)
+    detail = "ok" if passed else f"ends with: '{response.rstrip()[-40:]}'"
+    return passed, detail
+
+
+def validate_min_words(response: str) -> tuple:
+    wc = len(response.split())
+    passed = wc >= 50
+    detail = f"words={wc} (need ≥50)"
+    return passed, detail
+
+
+def validate_forbidden_word(response: str) -> tuple:
+    forbidden = "force"
+    found = forbidden.lower() in response.lower()
+    passed = not found
+    detail = "ok" if passed else f"'{forbidden}' found in response"
+    return passed, detail
 
 
 # ── IFEval task definitions ────────────────────────────────────────────────────
 
 IFEVAL_TASKS = [
     {
-        "id": "ifeval_001",
-        "description": "Keywords: carbon, renewable, future — no bullet points",
+        "id": "T1",
+        "constraint": "Keywords (carbon,renewable,future) + no bullets",
         "instruction": (
             "Write a short paragraph (3–5 sentences) about climate change. "
             "Your response MUST include the words 'carbon', 'renewable', and 'future' at least once each. "
             "Do NOT use any bullet points or numbered lists in your final answer. "
             "You may use the check_keywords skill on your draft before finalising."
         ),
-        "validator": validate_task1,
+        "validator": validate_keywords_no_bullets,
     },
     {
-        "id": "ifeval_002",
-        "description": "Exactly 3 numbered items, each a single sentence ending with '.'",
+        "id": "T2",
+        "constraint": "Exactly 3 numbered items, each ends with '.'",
         "instruction": (
             "List exactly 3 advantages of remote work. "
             "Format your answer as a numbered list using '1.', '2.', '3.'. "
             "Each item must be a single sentence ending with a period. "
-            "You may use the count_words skill to check your response length."
+            "You may use the count_words skill to check your response."
         ),
-        "validator": validate_task2,
+        "validator": validate_numbered_list_3,
+    },
+    {
+        "id": "T3",
+        "constraint": "Exactly 2 sentences about the moon",
+        "instruction": (
+            "Write exactly 2 sentences about the moon. "
+            "Your response must be exactly 2 sentences — no more, no less. "
+            "Do not use bullet points or lists."
+        ),
+        "validator": validate_two_sentences,
+    },
+    {
+        "id": "T4",
+        "constraint": "Must end with exact phrase",
+        "instruction": (
+            "Explain what a neural network is in 3–5 sentences. "
+            "Your response MUST end with this exact phrase: "
+            "'This is the essence of neural networks.'"
+        ),
+        "validator": validate_ends_with_phrase,
+    },
+    {
+        "id": "T5",
+        "constraint": "At least 50 words about space exploration",
+        "instruction": (
+            "Write a paragraph about space exploration. "
+            "Your response must be at least 50 words long. "
+            "You may use the count_words skill to verify your word count before finalising."
+        ),
+        "validator": validate_min_words,
+    },
+    {
+        "id": "T6",
+        "constraint": "Describe gravity without using 'force'",
+        "instruction": (
+            "Describe the concept of gravity in 2–4 sentences. "
+            "You must NOT use the word 'force' anywhere in your response. "
+            "You may use the check_keywords skill to verify the word is absent."
+        ),
+        "validator": validate_forbidden_word,
     },
 ]
 
 
+# ── Grid printer ───────────────────────────────────────────────────────────────
+
+def print_grid(results: dict):
+    """
+    results = {
+        model: { task_id: (passed: bool, detail: str) }
+    }
+    """
+    COL_TASK   = 4
+    COL_CONSTR = 42
+    COL_MODEL  = 14  # per model
+
+    models = list(results.keys())
+    tasks  = IFEVAL_TASKS
+
+    def pad(s, w):
+        s = str(s)
+        return s[:w].ljust(w)
+
+    sep_widths = [COL_TASK, COL_CONSTR] + [COL_MODEL] * len(models)
+    total = sum(sep_widths) + len(sep_widths) * 3 + 1
+
+    def hline(left="├", mid="┼", right="┤", fill="─"):
+        parts = [fill * (w + 2) for w in sep_widths]
+        print(left + mid.join(parts) + right)
+
+    def row(*cells):
+        widths = sep_widths
+        parts = [f" {pad(c, w)} " for c, w in zip(cells, widths)]
+        print("│" + "│".join(parts) + "│")
+
+    print()
+    print("┌" + "─" * (total - 2) + "┐")
+    title = "IFEval Results"
+    print("│" + title.center(total - 2) + "│")
+    hline("├", "┬", "┤")
+    row("Task", "Constraint", *models)
+    hline("├", "┼", "┤")
+
+    scores = {m: 0 for m in models}
+    for task in tasks:
+        tid = task["id"]
+        cells = [tid, task["constraint"]]
+        for m in models:
+            passed, detail = results[m][tid]
+            if passed:
+                scores[m] += 1
+            label = "PASS" if passed else "FAIL"
+            cells.append(f"{label}  {detail}"[:COL_MODEL])
+        row(*cells)
+
+    hline("├", "┼", "┤")
+    total_tasks = len(tasks)
+    score_cells = ["", "Score"]
+    for m in models:
+        s = scores[m]
+        pct = int(100 * s / total_tasks)
+        score_cells.append(f"{s}/{total_tasks} ({pct}%)")
+    row(*score_cells)
+    print("└" + "─" * (total - 2) + "┘")
+    print()
+
+
 # ── Runner ─────────────────────────────────────────────────────────────────────
 
-def run_ifeval_tasks():
-    print(f"Model : {MODEL}")
-    print(f"Skills: {list(SKILL_MAP.keys())}")
-    print("=" * 60)
+def run_all():
+    results = {m: {} for m in MODELS}
 
-    for task in IFEVAL_TASKS:
-        print(f"\nTask  : {task['id']}  —  {task['description']}")
-        print(f"Prompt: {task['instruction']}\n")
+    for model in MODELS:
+        print(f"\n{'='*60}")
+        print(f" Running model: {model}")
+        print(f"{'='*60}")
+        for task in IFEVAL_TASKS:
+            print(f"\n  [{task['id']}] {task['constraint']}")
+            response = run_agent(model, task["instruction"])
+            passed, detail = task["validator"](response)
+            results[model][task["id"]] = (passed, detail)
+            status = "PASS" if passed else "FAIL"
+            print(f"  → [{status}] {detail}")
 
-        response = run_agent(task["instruction"])
-
-        print(f"Response:\n{response}\n")
-
-        result = task["validator"](response)
-        status = "PASS" if result["passed"] else "FAIL"
-        print(f"Validation [{status}]: {result}")
-        print("-" * 60)
+    print_grid(results)
 
 
 if __name__ == "__main__":
-    run_ifeval_tasks()
+    run_all()
