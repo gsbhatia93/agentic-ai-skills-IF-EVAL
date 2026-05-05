@@ -153,7 +153,7 @@ IFEVAL_TASKS = [
 
 # ── Grid printer ───────────────────────────────────────────────────────────────
 
-def print_grid(results: dict):
+def print_grid(results: dict, tasks: list = None):
     COL_TASK   = 4
     COL_CONSTR = 42
     COL_MODEL  = 14
@@ -181,8 +181,9 @@ def print_grid(results: dict):
     row("Task", "Constraint", *models)
     hline("├", "┼", "┤")
 
+    task_list = tasks or IFEVAL_TASKS
     scores = {m: 0 for m in models}
-    for task in IFEVAL_TASKS:
+    for task in task_list:
         tid = task["id"]
         cells = [tid, task["constraint"]]
         for m in models:
@@ -193,7 +194,7 @@ def print_grid(results: dict):
         row(*cells)
 
     hline("├", "┼", "┤")
-    n = len(IFEVAL_TASKS)
+    n = len(task_list)
     row("", "Score", *[f"{scores[m]}/{n} ({int(100*scores[m]/n)}%)" for m in models])
     print("└" + "─" * (total - 2) + "┘")
     print()
@@ -201,10 +202,11 @@ def print_grid(results: dict):
 
 # ── Evaluate / Runner ──────────────────────────────────────────────────────────
 
-def evaluate(model: str) -> dict:
+def evaluate(model: str, tasks: list = None) -> dict:
     """Run all tasks for one model. Returns {task_id: (passed, detail)}."""
+    tasks = tasks or IFEVAL_TASKS
     results = {}
-    for task in IFEVAL_TASKS:
+    for task in tasks:
         messages = [{"role": "user", "content": task["instruction"]}]
         response = call_ollama(model, messages)
         passed, detail = task["validator"](response)
@@ -213,7 +215,8 @@ def evaluate(model: str) -> dict:
     return results
 
 
-def run_all():
+def run_all(tasks: list = None):
+    tasks = tasks or IFEVAL_TASKS
     models = get_models()
     print(f"  Models found: {models}")
     results = {}
@@ -222,9 +225,9 @@ def run_all():
         print(f"\n{'='*60}")
         print(f" Running model: {model}  [no skills]")
         print(f"{'='*60}")
-        results[model] = evaluate(model)
+        results[model] = evaluate(model, tasks)
 
-    print_grid(results)
+    print_grid(results, tasks)
 
 
 if __name__ == "__main__":
