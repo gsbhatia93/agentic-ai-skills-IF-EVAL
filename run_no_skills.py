@@ -26,7 +26,7 @@ def call_ollama(model: str, messages: list) -> str:
         headers={"Content-Type": "application/json"},
         method="POST",
     )
-    with urllib.request.urlopen(req, timeout=180) as resp:
+    with urllib.request.urlopen(req, timeout=60) as resp:
         return json.loads(resp.read())["message"]["content"]
 
 
@@ -207,9 +207,12 @@ def evaluate(model: str, tasks: list = None) -> dict:
     tasks = tasks or IFEVAL_TASKS
     results = {}
     for task in tasks:
-        messages = [{"role": "user", "content": task["instruction"]}]
-        response = call_ollama(model, messages)
-        passed, detail = task["validator"](response)
+        try:
+            messages = [{"role": "user", "content": task["instruction"]}]
+            response = call_ollama(model, messages)
+            passed, detail = task["validator"](response)
+        except Exception as e:
+            passed, detail = False, f"error: {str(e)[:30]}"
         results[task["id"]] = (passed, detail)
         print(f"    [{task['id']}] [{'PASS' if passed else 'FAIL'}] {detail}")
     return results

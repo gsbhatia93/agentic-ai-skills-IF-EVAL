@@ -56,7 +56,7 @@ def call_ollama(model: str, messages: list) -> str:
         headers={"Content-Type": "application/json"},
         method="POST",
     )
-    with urllib.request.urlopen(req, timeout=180) as resp:
+    with urllib.request.urlopen(req, timeout=60) as resp:
         return json.loads(resp.read())["message"]["content"]
 
 
@@ -78,7 +78,7 @@ def execute_tool_call(raw: str) -> str:
         return json.dumps({"error": str(exc)})
 
 
-def run_agent(model: str, user_prompt: str, max_rounds: int = 5) -> str:
+def run_agent(model: str, user_prompt: str, max_rounds: int = 3) -> str:
     messages = [
         {"role": "system", "content": SKILL_DESCRIPTIONS.strip()},
         {"role": "user", "content": user_prompt},
@@ -275,8 +275,11 @@ def evaluate(model: str, tasks: list = None) -> dict:
     tasks = tasks or IFEVAL_TASKS
     results = {}
     for task in tasks:
-        response = run_agent(model, task["instruction"])
-        passed, detail = task["validator"](response)
+        try:
+            response = run_agent(model, task["instruction"])
+            passed, detail = task["validator"](response)
+        except Exception as e:
+            passed, detail = False, f"error: {str(e)[:30]}"
         results[task["id"]] = (passed, detail)
         print(f"    [{task['id']}] [{'PASS' if passed else 'FAIL'}] {detail}")
     return results
