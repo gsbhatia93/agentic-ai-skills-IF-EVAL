@@ -36,9 +36,65 @@ def check_keywords(text: str, keywords: list) -> dict:
     return {"found": found, "missing": missing, "all_present": len(missing) == 0}
 
 
+def check_no_comma(text: str) -> dict:
+    has_comma = "," in text
+    return {"has_comma": has_comma, "passed": not has_comma}
+
+
+def count_highlighted_sections(text: str) -> dict:
+    count = len(re.findall(r"\*[^*\n]+\*", text))
+    return {"count": count}
+
+
+def count_placeholders(text: str) -> dict:
+    count = len(re.findall(r"\[[^\]\n]+\]", text))
+    return {"count": count}
+
+
+def check_title_format(text: str) -> dict:
+    has_title = bool(re.search(r"<<[^>]+>>", text))
+    return {"has_title": has_title}
+
+
+def check_case(text: str, case: str) -> dict:
+    letters = [c for c in text if c.isalpha()]
+    if case == "lower":
+        passed = all(c.islower() for c in letters)
+        detail = "ok" if passed else "uppercase letters found"
+    elif case == "upper":
+        passed = all(c.isupper() for c in letters)
+        detail = "ok" if passed else "lowercase letters found"
+    else:
+        passed, detail = False, f"unknown case: {case}"
+    return {"passed": passed, "detail": detail}
+
+
+def count_bullets(text: str) -> dict:
+    count = sum(1 for l in text.splitlines() if re.match(r"^\s*[-*•]", l))
+    return {"count": count}
+
+
+def count_sections(text: str, splitter: str) -> dict:
+    count = len(re.findall(rf"(?m)^{re.escape(splitter)}", text))
+    return {"count": count}
+
+
+def count_capital_words(text: str) -> dict:
+    count = len([w for w in text.split() if w.isupper() and w.isalpha()])
+    return {"count": count}
+
+
 SKILL_MAP = {
-    "count_words": count_words,
-    "check_keywords": check_keywords,
+    "count_words":                count_words,
+    "check_keywords":             check_keywords,
+    "check_no_comma":             check_no_comma,
+    "count_highlighted_sections": count_highlighted_sections,
+    "count_placeholders":         count_placeholders,
+    "check_title_format":         check_title_format,
+    "check_case":                 check_case,
+    "count_bullets":              count_bullets,
+    "count_sections":             count_sections,
+    "count_capital_words":        count_capital_words,
 }
 
 with open(SKILLS_FILE) as f:
