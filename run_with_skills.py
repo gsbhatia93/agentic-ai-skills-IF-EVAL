@@ -465,9 +465,11 @@ def print_grid(results: dict, tasks: list = None):
 def evaluate(model: str, tasks: list = None) -> dict:
     """Run all tasks for one model. Returns {task_id: (passed, detail)}."""
     tasks = tasks or IFEVAL_TASKS
+    reset_tool_usage()
 
     if not supports_tools(model):
         print(f"    [SKIP] {model} does not support tool calling")
+        print_tool_usage()
         return {t["id"]: (False, "tools unsupported") for t in tasks}
 
     results = {}
@@ -479,6 +481,8 @@ def evaluate(model: str, tasks: list = None) -> dict:
             passed, detail = False, f"error: {str(e)[:30]}"
         results[task["id"]] = (passed, detail)
         print(f"    [{task['id']}] [{'PASS' if passed else 'FAIL'}] {detail}")
+
+    print_tool_usage()
     return results
 
 
@@ -492,9 +496,7 @@ def run_all(tasks: list = None):
         print(f"\n{'='*60}")
         print(f" Running model: {model}  [with skills]")
         print(f"{'='*60}")
-        reset_tool_usage()
         results[model] = evaluate(model, tasks)
-        print_tool_usage()
 
     print_grid(results, tasks)
 
