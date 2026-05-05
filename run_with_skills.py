@@ -12,9 +12,14 @@ import re
 import urllib.request
 
 OLLAMA_URL = "http://localhost:11434"
-MODELS = ["llama3:8b", "qwen2.5:3b"]
 
 SKILLS_FILE = os.path.join(os.path.dirname(__file__), "skills.md")
+
+
+def get_models() -> list:
+    req = urllib.request.Request(f"{OLLAMA_URL}/api/tags")
+    with urllib.request.urlopen(req, timeout=10) as resp:
+        return [m["name"] for m in json.loads(resp.read())["models"]]
 
 
 # ── Skills ─────────────────────────────────────────────────────────────────────
@@ -265,9 +270,11 @@ def print_grid(results: dict):
 # ── Runner ─────────────────────────────────────────────────────────────────────
 
 def run_all():
-    results = {m: {} for m in MODELS}
+    models = get_models()
+    print(f"  Models found: {models}")
+    results = {m: {} for m in models}
 
-    for model in MODELS:
+    for model in models:
         print(f"\n{'='*60}")
         print(f" Running model: {model}  [with skills]")
         print(f"{'='*60}")
