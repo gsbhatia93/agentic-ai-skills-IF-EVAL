@@ -19,10 +19,11 @@ import ifeval_loader
 
 HF_TASK_COUNT    = 20   # number of real IFEval tasks to pull from HuggingFace
 USE_CUSTOM_TASKS = False  # set True to re-enable hand-crafted tasks
+PAUSED_MODELS    = {"llama3:8b", "qwen2.5:3b"}
 
 
 def get_models():
-    return run_no_skills.get_models()
+    return [m for m in run_no_skills.get_models() if m not in PAUSED_MODELS]
 
 
 def build_tasks():
