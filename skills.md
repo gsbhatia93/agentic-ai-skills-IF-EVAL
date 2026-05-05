@@ -1,72 +1,201 @@
-You have access to the following skills you may call before writing your final answer.
-To call a skill, output a JSON block with the marker exactly like this:
+# IFEval Skills — Tool Reference
 
-<tool_call>{"name": "skill_name", "args": {...}}</tool_call>
+Skills are passed to the model as structured tools via the API (Anthropic-style tool use).
+The model receives these as callable tools and returns `tool_use` blocks; the runner
+executes each tool and feeds results back as `tool_result` messages before the model
+produces its final answer.
 
-After seeing the skill result (provided as <tool_result>...</tool_result>), revise if needed
-and write your final answer. Do NOT include any <tool_call> markers in your final answer.
+---
 
-Available skills:
+## Available Tools
 
-1. count_words(text: str)  →  {"word_count": int, "char_count": int}
-   Use to verify your draft meets a word-count requirement.
+### `count_words`
+Count the number of words and characters in a text.
 
-2. check_keywords(text: str, keywords: [str])  →  {"found": [...], "missing": [...], "all_present": bool}
-   Use to verify required keywords appear in your draft.
+| Parameter | Type   | Required |
+|-----------|--------|----------|
+| `text`    | string | yes      |
 
-3. check_no_comma(text: str)  →  {"has_comma": bool, "passed": bool}
-   Use to verify your response contains no commas.
+**Returns:** `{"word_count": int, "char_count": int}`
 
-4. count_highlighted_sections(text: str)  →  {"count": int}
-   Counts sections marked with markdown italics like *highlighted text*.
-   Use to verify you have the required number of highlighted sections.
+---
 
-5. count_placeholders(text: str)  →  {"count": int}
-   Counts placeholders in the format [placeholder_name].
-   Use to verify you have included the required number of placeholders.
+### `check_keywords`
+Check which keywords are present or missing in a text.
 
-6. check_title_format(text: str)  →  {"has_title": bool}
-   Checks that your response contains a title in double angular brackets like <<Title Here>>.
+| Parameter  | Type            | Required |
+|------------|-----------------|----------|
+| `text`     | string          | yes      |
+| `keywords` | array of string | yes      |
 
-7. check_case(text: str, case: str)  →  {"passed": bool, "detail": str}
-   Checks letter casing. case must be "lower" (all lowercase) or "upper" (all uppercase).
+**Returns:** `{"found": [...], "missing": [...], "all_present": bool}`
 
-8. count_bullets(text: str)  →  {"count": int}
-   Counts bullet list items (lines starting with -, *, or •).
-   Use to verify you have the required number of bullet points.
+---
 
-9. count_sections(text: str, splitter: str)  →  {"count": int}
-   Counts the number of sections that begin with the given splitter word (e.g. "Section").
-   Use to verify you have the required number of sections.
+### `check_no_comma`
+Check that a text contains no commas.
 
-10. count_capital_words(text: str)  →  {"count": int}
-    Counts words that are entirely in UPPERCASE (e.g. "NASA", "IMPORTANT").
-    Use to verify your response has the required number of capitalized words.
+| Parameter | Type   | Required |
+|-----------|--------|----------|
+| `text`    | string | yes      |
 
-11. check_starts_with_prompt(text: str, prompt: str)  →  {"passed": bool, "detail": str}
-    Checks that your response begins by repeating the original prompt exactly.
-    Use when the task requires you to first repeat the prompt before answering.
+**Returns:** `{"has_comma": bool, "passed": bool}`
 
-12. check_quotation(text: str)  →  {"passed": bool, "detail": str}
-    Checks that your entire response is wrapped in double quotation marks.
-    Use when the task requires the full response to start with " and end with ".
+---
 
-13. check_json_format(text: str)  →  {"passed": bool, "detail": str}
-    Checks that your entire response is valid JSON.
-    Use when the task requires the output to be wrapped in JSON format.
+### `count_highlighted_sections`
+Count sections marked with markdown italics (`*highlighted text*`).
 
-14. count_paragraphs(text: str)  →  {"count": int}
-    Counts the number of paragraphs (blocks of text separated by blank lines).
-    Use to verify your response has the required number of paragraphs.
+| Parameter | Type   | Required |
+|-----------|--------|----------|
+| `text`    | string | yes      |
 
-15. check_two_responses(text: str)  →  {"passed": bool, "detail": str}
-    Checks that your response contains two separate answers divided by exactly 6 asterisks (******).
-    Use when the task requires two distinct responses.
+**Returns:** `{"count": int}`
 
-16. count_letter_frequency(text: str, letter: str)  →  {"count": int}
-    Counts how many times a specific letter appears in the response (case-insensitive).
-    Use to verify the required letter frequency constraint.
+---
 
-17. check_ends_with(text: str, phrase: str)  →  {"passed": bool, "detail": str}
-    Checks that your response ends with an exact phrase.
-    Use when the task requires a specific ending phrase.
+### `count_placeholders`
+Count placeholders in the format `[placeholder_name]`.
+
+| Parameter | Type   | Required |
+|-----------|--------|----------|
+| `text`    | string | yes      |
+
+**Returns:** `{"count": int}`
+
+---
+
+### `check_title_format`
+Check that a text contains a title in double angular brackets (`<<Title Here>>`).
+
+| Parameter | Type   | Required |
+|-----------|--------|----------|
+| `text`    | string | yes      |
+
+**Returns:** `{"has_title": bool}`
+
+---
+
+### `check_case`
+Check letter casing of a text.
+
+| Parameter | Type   | Required | Notes                        |
+|-----------|--------|----------|------------------------------|
+| `text`    | string | yes      |                              |
+| `case`    | string | yes      | `"lower"` or `"upper"` only  |
+
+**Returns:** `{"passed": bool, "detail": str}`
+
+---
+
+### `count_bullets`
+Count bullet list items (lines starting with `-`, `*`, or `•`).
+
+| Parameter | Type   | Required |
+|-----------|--------|----------|
+| `text`    | string | yes      |
+
+**Returns:** `{"count": int}`
+
+---
+
+### `count_sections`
+Count sections that begin with a given splitter word (e.g. `"Section"`).
+
+| Parameter  | Type   | Required |
+|------------|--------|----------|
+| `text`     | string | yes      |
+| `splitter` | string | yes      |
+
+**Returns:** `{"count": int}`
+
+---
+
+### `count_capital_words`
+Count words that are entirely in UPPERCASE (e.g. `NASA`, `IMPORTANT`).
+
+| Parameter | Type   | Required |
+|-----------|--------|----------|
+| `text`    | string | yes      |
+
+**Returns:** `{"count": int}`
+
+---
+
+### `check_starts_with_prompt`
+Check that a text begins by repeating the original prompt exactly.
+
+| Parameter | Type   | Required |
+|-----------|--------|----------|
+| `text`    | string | yes      |
+| `prompt`  | string | yes      |
+
+**Returns:** `{"passed": bool, "detail": str}`
+
+---
+
+### `check_quotation`
+Check that a text is wrapped in double quotation marks.
+
+| Parameter | Type   | Required |
+|-----------|--------|----------|
+| `text`    | string | yes      |
+
+**Returns:** `{"passed": bool, "detail": str}`
+
+---
+
+### `check_json_format`
+Check that a text is valid JSON.
+
+| Parameter | Type   | Required |
+|-----------|--------|----------|
+| `text`    | string | yes      |
+
+**Returns:** `{"passed": bool, "detail": str}`
+
+---
+
+### `count_paragraphs`
+Count paragraphs (blocks of text separated by blank lines).
+
+| Parameter | Type   | Required |
+|-----------|--------|----------|
+| `text`    | string | yes      |
+
+**Returns:** `{"count": int}`
+
+---
+
+### `check_two_responses`
+Check that a text contains two responses divided by `******`.
+
+| Parameter | Type   | Required |
+|-----------|--------|----------|
+| `text`    | string | yes      |
+
+**Returns:** `{"passed": bool, "detail": str}`
+
+---
+
+### `count_letter_frequency`
+Count occurrences of a specific letter (case-insensitive).
+
+| Parameter | Type   | Required |
+|-----------|--------|----------|
+| `text`    | string | yes      |
+| `letter`  | string | yes      |
+
+**Returns:** `{"count": int}`
+
+---
+
+### `check_ends_with`
+Check that a text ends with an exact phrase.
+
+| Parameter | Type   | Required |
+|-----------|--------|----------|
+| `text`    | string | yes      |
+| `phrase`  | string | yes      |
+
+**Returns:** `{"passed": bool, "detail": str}`
