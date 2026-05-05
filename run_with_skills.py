@@ -168,18 +168,30 @@ def call_ollama(model: str, messages: list) -> str:
 TOOL_CALL_RE = re.compile(r"<tool_call>(.*?)</tool_call>", re.DOTALL)
 
 
+DEBUG = True  # set False to silence skill debug output
+
+
+def _dbg(msg: str):
+    if DEBUG:
+        print(f"    [debug] {msg}")
+
+
 def execute_tool_call(raw: str) -> str:
+    _dbg(f"raw tool_call received: {raw[:120]}")
     try:
         call = json.loads(raw)
         fn_name = call["name"]
         fn_args = call.get("args", {})
+        _dbg(f"parsed  → name={fn_name!r}  args={fn_args}")
         fn = SKILL_MAP.get(fn_name)
         if fn is None:
+            _dbg(f"UNKNOWN skill '{fn_name}' — available: {list(SKILL_MAP.keys())}")
             return json.dumps({"error": f"unknown skill: {fn_name}"})
         result = fn(**fn_args)
-        print(f"    [skill] {fn_name} → {result}")
+        _dbg(f"result  → {result}")
         return json.dumps(result)
     except Exception as exc:
+        _dbg(f"ERROR executing tool_call: {exc}")
         return json.dumps({"error": str(exc)})
 
 
@@ -188,10 +200,14 @@ def run_agent(model: str, user_prompt: str, max_rounds: int = 3) -> str:
         {"role": "system", "content": SKILL_DESCRIPTIONS.strip()},
         {"role": "user", "content": user_prompt},
     ]
-    for _ in range(max_rounds):
+    for round_num in range(max_rounds):
+        _dbg(f"round {round_num + 1}/{max_rounds} — calling {model}")
         reply = call_ollama(model, messages)
+        _dbg(f"reply preview: {reply[:120].replace(chr(10), ' ')}")
         tool_calls = TOOL_CALL_RE.findall(reply)
+        _dbg(f"tool_calls found: {len(tool_calls)}")
         if not tool_calls:
+            _dbg("no tool calls — returning final answer")
             return reply.strip()
         result_blocks = "\n".join(
             f"<tool_result>{execute_tool_call(tc)}</tool_result>"
@@ -199,6 +215,7 @@ def run_agent(model: str, user_prompt: str, max_rounds: int = 3) -> str:
         )
         messages.append({"role": "assistant", "content": reply})
         messages.append({"role": "user", "content": result_blocks})
+    _dbg("max rounds reached — returning last reply")
     return reply.strip()
 
 
