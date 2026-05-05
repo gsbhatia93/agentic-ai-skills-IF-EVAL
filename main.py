@@ -19,7 +19,7 @@ import ifeval_loader
 
 HF_TASK_COUNT    = 10   # number of real IFEval tasks to pull from HuggingFace
 USE_CUSTOM_TASKS = False  # set True to re-enable hand-crafted tasks
-PAUSED_MODELS    = {"llama3:8b", "qwen2.5:3b", "qwen3:1.7b", "gemma3:1b"}
+PAUSED_MODELS    = {"llama3:8b", "qwen2.5:3b", "qwen3:1.7b"}
 
 
 def get_models():
