@@ -199,24 +199,30 @@ def print_grid(results: dict):
     print()
 
 
-# ── Runner ─────────────────────────────────────────────────────────────────────
+# ── Evaluate / Runner ──────────────────────────────────────────────────────────
+
+def evaluate(model: str) -> dict:
+    """Run all tasks for one model. Returns {task_id: (passed, detail)}."""
+    results = {}
+    for task in IFEVAL_TASKS:
+        messages = [{"role": "user", "content": task["instruction"]}]
+        response = call_ollama(model, messages)
+        passed, detail = task["validator"](response)
+        results[task["id"]] = (passed, detail)
+        print(f"    [{task['id']}] [{'PASS' if passed else 'FAIL'}] {detail}")
+    return results
+
 
 def run_all():
     models = get_models()
     print(f"  Models found: {models}")
-    results = {m: {} for m in models}
+    results = {}
 
     for model in models:
         print(f"\n{'='*60}")
         print(f" Running model: {model}  [no skills]")
         print(f"{'='*60}")
-        for task in IFEVAL_TASKS:
-            print(f"\n  [{task['id']}] {task['constraint']}")
-            messages = [{"role": "user", "content": task["instruction"]}]
-            response = call_ollama(model, messages)
-            passed, detail = task["validator"](response)
-            results[model][task["id"]] = (passed, detail)
-            print(f"  → [{'PASS' if passed else 'FAIL'}] {detail}")
+        results[model] = evaluate(model)
 
     print_grid(results)
 
