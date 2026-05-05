@@ -84,6 +84,35 @@ def count_capital_words(text: str) -> dict:
     return {"count": count}
 
 
+def check_json_format(text: str) -> dict:
+    try:
+        json.loads(text.strip())
+        return {"passed": True, "detail": "valid JSON"}
+    except Exception as e:
+        return {"passed": False, "detail": f"invalid JSON: {str(e)[:40]}"}
+
+
+def count_paragraphs(text: str) -> dict:
+    paragraphs = [p for p in re.split(r"\n\s*\n", text.strip()) if p.strip()]
+    return {"count": len(paragraphs)}
+
+
+def check_two_responses(text: str) -> dict:
+    passed = "******" in text
+    return {"passed": passed, "detail": "ok" if passed else "****** separator not found"}
+
+
+def count_letter_frequency(text: str, letter: str) -> dict:
+    count = text.lower().count(letter.lower())
+    return {"count": count}
+
+
+def check_ends_with(text: str, phrase: str) -> dict:
+    passed = text.strip().endswith(phrase)
+    detail = "ok" if passed else f"ends with: '...{text.strip()[-40:]}'"
+    return {"passed": passed, "detail": detail}
+
+
 def check_starts_with_prompt(text: str, prompt: str) -> dict:
     passed = text.strip().startswith(prompt.strip())
     detail = "ok" if passed else f"starts with: '{text.strip()[:40]}'"
@@ -110,6 +139,11 @@ SKILL_MAP = {
     "count_capital_words":        count_capital_words,
     "check_starts_with_prompt":   check_starts_with_prompt,
     "check_quotation":            check_quotation,
+    "check_json_format":          check_json_format,
+    "count_paragraphs":           count_paragraphs,
+    "check_two_responses":        check_two_responses,
+    "count_letter_frequency":     count_letter_frequency,
+    "check_ends_with":            check_ends_with,
 }
 
 with open(SKILLS_FILE) as f:

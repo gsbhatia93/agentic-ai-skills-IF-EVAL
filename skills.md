@@ -50,3 +50,23 @@ Available skills:
 12. check_quotation(text: str)  →  {"passed": bool, "detail": str}
     Checks that your entire response is wrapped in double quotation marks.
     Use when the task requires the full response to start with " and end with ".
+
+13. check_json_format(text: str)  →  {"passed": bool, "detail": str}
+    Checks that your entire response is valid JSON.
+    Use when the task requires the output to be wrapped in JSON format.
+
+14. count_paragraphs(text: str)  →  {"count": int}
+    Counts the number of paragraphs (blocks of text separated by blank lines).
+    Use to verify your response has the required number of paragraphs.
+
+15. check_two_responses(text: str)  →  {"passed": bool, "detail": str}
+    Checks that your response contains two separate answers divided by exactly 6 asterisks (******).
+    Use when the task requires two distinct responses.
+
+16. count_letter_frequency(text: str, letter: str)  →  {"count": int}
+    Counts how many times a specific letter appears in the response (case-insensitive).
+    Use to verify the required letter frequency constraint.
+
+17. check_ends_with(text: str, phrase: str)  →  {"passed": bool, "detail": str}
+    Checks that your response ends with an exact phrase.
+    Use when the task requires a specific ending phrase.
